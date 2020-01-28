@@ -17,36 +17,34 @@ UPSTREAM_URL = 'https://github.com/NixOS/nixpkgs'
 _log = logging.getLogger(__name__)
 
 
-def run(*cmd, **kw):
-    if 'cwd' in kw:
-        dirinfo = f"({kw['cwd']}) "
-    else:
-        dirinfo = ''
-    _log.debug('run %s%s', dirinfo, ' '.join(cmd))
-    kw.setdefault('check', True)
-    kw.setdefault('stdout', subprocess.PIPE)
-    try:
-        stdout = subprocess.run(cmd, **kw).stdout.decode().strip()
-    except Exception as e:
-        _log.error('>>> %s', e)
-        raise
-    if stdout:
-        _log.debug('>>> %s', stdout)
-    return stdout
-
-
 class Repository:
 
     def __init__(self, directory, url):
         self.dir = directory
         self.url = url
 
+    def run(self, *cmd, **kw):
+        """Executes `cmd` in this repository's workdir."""
+        kw.setdefault('cwd', self.dir)
+        kw.setdefault('check', True)
+        kw.setdefault('stdout', subprocess.PIPE)
+        _log.debug('run (%s) %s', kw['cwd'], ' '.join(cmd))
+        try:
+            stdout = subprocess.run(cmd, **kw).stdout.decode().strip()
+        except Exception as e:
+            _log.error('>>> %s', e)
+            raise
+        if stdout:
+            _log.debug('>>> %s', stdout)
+        return stdout
+
     def ensure(self):
         if not p.exists(f'{self.dir}/.git'):
-            _log.info(f'Cloning {self.url}.git')
-            run('git', 'clone', self.url, self.dir)
+            _log.info(f'Cloning {self.url}')
+            os.makedirs(self.dir, exist_ok=True)
+            self.run('git', 'clone', f'{self.url}.git')
         else:
-            run('git', 'fetch', '--prune', cwd=self.dir)
+            self.run('git', 'fetch', '--prune')
 
 
 class Nixpkgs(Repository):
@@ -55,20 +53,23 @@ class Nixpkgs(Repository):
 
     def ensure(self):
         super().ensure()
-        run('git', 'checkout', f'nixos-{TRUNK}', cwd=self.dir)
-        run('git', 'reset', '--hard', 'HEAD', cwd=self.dir)
-        run('git', 'merge', '--ff', f'origin/nixos-{TRUNK}', cwd=self.dir)
+        self.run('git', 'checkout', f'nixos-{TRUNK}')
+        self.run('git', 'reset', '--hard', 'HEAD')
+        self.run('git', 'merge', '--ff', f'origin/nixos-{TRUNK}')
         _log.info('Updating upstream refs')
-        if f'upstream\t{UPSTREAM_URL}' not in run(
-                'git', 'remote', '-v', cwd='nixpkgs'):
-            run('git', 'remote', 'add', 'upstream', f'{UPSTREAM_URL}.git',
-                cwd='nixpkgs')
-        run('git', 'remote', 'update', '-p', 'upstream', cwd=self.dir)
+        if f'upstream\t{UPSTREAM_URL}' not in self.run('git', 'remote', '-v'):
+            self.run('git', 'remote', 'add', 'upstream', f'{UPSTREAM_URL}.git')
+        self.run('git', 'remote', 'update', '-p', 'upstream')
+
+    def query_pinning(self, branch):
+        return self.run('git', 'rev-parse', f'upstream/{branch}')
+
+    def query_trunk_pinning(self):
+        return self.run('git', 'rev-parse', f'nixos-{TRUNK}')
 
     def needs_update(self):
-        diff = run(
-            'git', 'log', '--oneline',
-            f'HEAD..upstream/nixos-{TRUNK}', cwd=self.dir)
+        diff = self.run(
+            'git', 'log', '--oneline', f'HEAD..upstream/nixos-{TRUNK}')
         if not diff:
             return False
         _log.info(
@@ -77,20 +78,13 @@ class Nixpkgs(Repository):
 
     def track_upstream(self):
         if self.needs_update():
-            run('git', 'merge', '--no-edit', f'upstream/nixos-{TRUNK}',
-                cwd=self.dir)
+            self.run('git', 'merge', '--no-edit', f'upstream/nixos-{TRUNK}')
             self.needs_push = True
-
-    def query_pinning(self, branch):
-        return run('git', 'rev-parse', f'upstream/{branch}', cwd=self.dir)
-
-    def query_trunk_pinning(self):
-        return run('git', 'rev-parse', f'nixos-{TRUNK}', cwd=self.dir)
 
     def push(self):
         if self.needs_push:
             _log.warning('Push nixpkgs to origin')
-            run('git', 'push', 'origin', f'nixos-{TRUNK}', cwd=self.dir)
+            self.run('git', 'push', 'origin', f'nixos-{TRUNK}')
 
 
 class FcNixOS(Repository):
@@ -100,14 +94,14 @@ class FcNixOS(Repository):
 
     def ensure(self):
         super().ensure()
-        run('git', 'checkout', f'fc-{TRUNK}-dev', cwd=self.dir)
-        run('git', 'reset', '--hard', 'HEAD', cwd=self.dir)
-        run('git', 'merge', '--ff', f'origin/fc-{TRUNK}-dev', cwd=self.dir)
+        self.run('git', 'checkout', f'fc-{TRUNK}-dev')
+        self.run('git', 'reset', '--hard', 'HEAD')
+        self.run('git', 'merge', f'origin/fc-{TRUNK}-dev')
         self.feature_branch = 'auto-pin-' + \
-            run('git', 'rev-parse', 'HEAD', cwd=self.dir)[:9]
-        run('git', 'branch', self.feature_branch, cwd=self.dir, check=False)
-        run('git', 'checkout', self.feature_branch, cwd=self.dir)
-        run('git', 'merge', f'fc-{TRUNK}-dev', cwd=self.dir)
+            self.run('git', 'rev-parse', 'HEAD')[:9]
+        self.run('git', 'branch', self.feature_branch, check=False)
+        self.run('git', 'checkout', self.feature_branch)
+        self.run('git', 'merge', f'fc-{TRUNK}-dev')
 
     def update_pinnings(self, nixpkgs):
         vers = json.load(open(p.join(self.dir, 'versions.json')))
@@ -128,7 +122,7 @@ class FcNixOS(Repository):
             rev = vers_new[branch]['rev']
             if rev == vers[branch]['rev']:
                 continue
-            sha256 = run(
+            sha256 = self.run(
                 'nix-prefetch-url', '--unpack',
                 f'{UPSTREAM_URL}/archive/{rev}.zip')
             vers_new[branch]['sha256'] = sha256
@@ -136,10 +130,11 @@ class FcNixOS(Repository):
         _log.info('Updating pinnings in version.json')
         with open(p.join(self.dir, 'versions.json'), 'w') as f:
             json.dump(vers_new, f, indent=2, sort_keys=True)
-        run('git', 'add', '.', cwd=self.dir)
-        run('git', 'commit', '--no-edit', '-m',
-            '[auto] Update pinnings of tracked branches', cwd=self.dir,
-            check=False)
+            f.write('\n')
+        self.run('git', 'add', '.')
+        self.run('git', 'commit', '--no-edit', '-m',
+                 'Update pinnings of tracked branches',
+                 check=False)
         self.issue_pr = True
 
     def create_pr(self):
@@ -147,14 +142,14 @@ class FcNixOS(Repository):
             _log.info('Nothing to submit')
             return
         _log.warning('create fc-nixos pull request')
-        run('git', 'push', '-u', 'origin', self.feature_branch, cwd=self.dir)
+        self.run('git', 'push', '-u', 'origin', self.feature_branch)
         resp = github.request('POST', API_BASE_URL + '/pulls', {
-            'title': '[auto] Update pinnings of tracked branches',
+            'title': '(auto) Update pinnings of tracked branches',
             'head': self.feature_branch,
             'base': f'fc-{TRUNK}-dev',
             'maintainer_can_modify': True,
         })
-        _log.info('Github>>> %s', resp)
+        _log.debug('>>> %s', resp)
         _log.info('Created pull request: %s', resp.json()['html_url'])
 
 
@@ -167,11 +162,13 @@ def main():
         except FileNotFoundError:
             continue
     a = argparse.ArgumentParser()
-    a.add_argument('basedir', default='.')
+    a.add_argument('workdir', default='.',
+                   help='directory to hold nixpkgs and fc-nixos checkouts')
+    a.add_argument('-v', '--verbose', action='store_true', help='more output')
     args = a.parse_args()
-    logging.basicConfig(level=logging.DEBUG)
-    os.makedirs(args.basedir, exist_ok=True)
-    os.chdir(args.basedir)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
+    os.makedirs(args.workdir, exist_ok=True)
+    os.chdir(args.workdir)
     nixpkgs = Nixpkgs('nixpkgs', NIXPKGS_URL)
     nixpkgs.ensure()
     nixpkgs.track_upstream()
