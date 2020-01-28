@@ -1,5 +1,7 @@
+from py_dotenv import read_dotenv
 import argparse
 import copy
+import github_api_v3 as github
 import json
 import logging
 import os
@@ -8,7 +10,8 @@ import subprocess
 
 TRUNK = '19.03'
 NIXPKGS_URL = 'git@github.com:flyingcircusio/nixpkgs'
-FC_NIXOS_URL = 'git@github.com:ckauhaus/fc-nixos'
+FC_NIXOS_URL = 'git@github.com:flyingcircusio/fc-nixos'
+API_BASE_URL = 'https://api.github.com/repos/flyingcircusio/fc-nixos'
 UPSTREAM_URL = 'https://github.com/NixOS/nixpkgs'
 
 _log = logging.getLogger(__name__)
@@ -22,7 +25,11 @@ def run(*cmd, **kw):
     _log.debug('run %s%s', dirinfo, ' '.join(cmd))
     kw.setdefault('check', True)
     kw.setdefault('stdout', subprocess.PIPE)
-    stdout = subprocess.run(cmd, **kw).stdout.decode().strip()
+    try:
+        stdout = subprocess.run(cmd, **kw).stdout.decode().strip()
+    except Exception as e:
+        _log.error('>>> %s', e)
+        raise
     if stdout:
         _log.debug('>>> %s', stdout)
     return stdout
@@ -89,12 +96,18 @@ class Nixpkgs(Repository):
 class FcNixOS(Repository):
 
     issue_pr = False
+    feature_branch = None
 
     def ensure(self):
         super().ensure()
         run('git', 'checkout', f'fc-{TRUNK}-dev', cwd=self.dir)
         run('git', 'reset', '--hard', 'HEAD', cwd=self.dir)
         run('git', 'merge', '--ff', f'origin/fc-{TRUNK}-dev', cwd=self.dir)
+        self.feature_branch = 'auto-pin-' + \
+            run('git', 'rev-parse', 'HEAD', cwd=self.dir)[:9]
+        run('git', 'branch', self.feature_branch, cwd=self.dir, check=False)
+        run('git', 'checkout', self.feature_branch, cwd=self.dir)
+        run('git', 'merge', f'fc-{TRUNK}-dev', cwd=self.dir)
 
     def update_pinnings(self, nixpkgs):
         vers = json.load(open(p.join(self.dir, 'versions.json')))
@@ -119,20 +132,40 @@ class FcNixOS(Repository):
                 'nix-prefetch-url', '--unpack',
                 f'{UPSTREAM_URL}/archive/{rev}.zip')
             vers_new[branch]['sha256'] = sha256
+        _log.info('Creating branch')
         _log.info('Updating pinnings in version.json')
         with open(p.join(self.dir, 'versions.json'), 'w') as f:
             json.dump(vers_new, f, indent=2, sort_keys=True)
+        run('git', 'add', '.', cwd=self.dir)
+        run('git', 'commit', '--no-edit', '-m',
+            '[auto] Update pinnings of tracked branches', cwd=self.dir,
+            check=False)
         self.issue_pr = True
 
     def create_pr(self):
-        if self.issue_pr:
-            _log.warning('create fc-nixos pull request')
-            run('git', 'checkout', '-b', 'update-versions', cwd=self.dir)
-            run('git', 'commit', '--no-edit', '-m',
-                '[auto] Update versions of tracked branches')
+        if not self.issue_pr:
+            _log.info('Nothing to submit')
+            return
+        _log.warning('create fc-nixos pull request')
+        run('git', 'push', '-u', 'origin', self.feature_branch, cwd=self.dir)
+        resp = github.request('POST', API_BASE_URL + '/pulls', {
+            'title': '[auto] Update pinnings of tracked branches',
+            'head': self.feature_branch,
+            'base': f'fc-{TRUNK}-dev',
+            'maintainer_can_modify': True,
+        })
+        _log.info('Github>>> %s', resp)
+        _log.info('Created pull request: %s', resp.json()['html_url'])
 
 
 def main():
+    # .env should contain GITHUB_TOKEN
+    for d in ['.', p.dirname(__file__)]:
+        try:
+            read_dotenv(p.join(d, '.env'))
+            break
+        except FileNotFoundError:
+            continue
     a = argparse.ArgumentParser()
     a.add_argument('basedir', default='.')
     args = a.parse_args()
