@@ -18,3 +18,5 @@ pyvenv.cfg
 .tox
 .cache
 .env
+pip-wheel-metadata/
+work/

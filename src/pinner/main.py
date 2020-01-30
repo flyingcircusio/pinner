@@ -8,11 +8,17 @@ import os
 import os.path as p
 import subprocess
 
+# Main upstream version which we follow. Main branch is 'fc-{TRUNK}-dev'.
+# Must be adapted on platform upgrades.
 TRUNK = '19.03'
+
+# Repo of our nixpkgs fork and where it has been forked from
 NIXPKGS_URL = 'git@github.com:flyingcircusio/nixpkgs'
+UPSTREAM_URL = 'https://github.com/NixOS/nixpkgs'
+
+# Repo of our overlay and corresponding API endpoint
 FC_NIXOS_URL = 'git@github.com:flyingcircusio/fc-nixos'
 API_BASE_URL = 'https://api.github.com/repos/flyingcircusio/fc-nixos'
-UPSTREAM_URL = 'https://github.com/NixOS/nixpkgs'
 
 _log = logging.getLogger(__name__)
 
@@ -23,7 +29,7 @@ class Repository:
         self.dir = directory
         self.url = url
 
-    def run(self, *cmd, **kw):
+    def run(self, *cmd, print_stdout=True, **kw):
         """Executes `cmd` in this repository's workdir."""
         kw.setdefault('cwd', self.dir)
         kw.setdefault('check', True)
@@ -34,7 +40,7 @@ class Repository:
         except Exception as e:
             _log.error('>>> %s', e)
             raise
-        if stdout:
+        if stdout and print_stdout:
             _log.debug('>>> %s', stdout)
         return stdout
 
@@ -42,7 +48,7 @@ class Repository:
         if not p.exists(f'{self.dir}/.git'):
             _log.info(f'Cloning {self.url}')
             os.makedirs(self.dir, exist_ok=True)
-            self.run('git', 'clone', f'{self.url}.git')
+            self.run('git', 'clone', f'{self.url}.git', self.dir, cwd='.')
         else:
             self.run('git', 'fetch', '--prune')
 
@@ -141,7 +147,7 @@ class FcNixOS(Repository):
         if not self.issue_pr:
             _log.info('Nothing to submit')
             return
-        _log.warning('create fc-nixos pull request')
+        _log.info('Creating fc-nixos pull request')
         self.run('git', 'push', '-u', 'origin', self.feature_branch)
         resp = github.request('POST', API_BASE_URL + '/pulls', {
             'title': '(auto) Update pinnings of tracked branches',
