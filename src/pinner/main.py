@@ -1,3 +1,4 @@
+from .packageset import Packageset
 from py_dotenv import read_dotenv
 import argparse
 import copy
@@ -6,6 +7,7 @@ import json
 import logging
 import os
 import os.path as p
+import re
 import subprocess
 
 # Main upstream version which we follow. Main branch is 'fc-{TRUNK}-dev'.
@@ -97,6 +99,8 @@ class FcNixOS(Repository):
 
     issue_pr = False
     feature_branch = None
+    pkgset_before = None
+    pkgset_after = None
 
     def ensure(self):
         super().ensure()
@@ -109,7 +113,18 @@ class FcNixOS(Repository):
         self.run('git', 'checkout', self.feature_branch)
         self.run('git', 'merge', f'fc-{TRUNK}-dev')
 
+    R_PATH = re.compile(r'NIX_PATH=([^:]*):')
+
+    def packageset(self):
+        path = self.run('./dev-setup')
+        path = self.R_PATH.search(path).group(1)
+        pkgs = self.run(
+            'nix-env', '-I', path, '-f', 'default.nix', '--query',
+            '--available', '--attr-path', print_stdout=False)
+        return Packageset.parse(pkgs)
+
     def update_pinnings(self, nixpkgs):
+        self.pkgset_before = self.packageset()
         vers = json.load(open(p.join(self.dir, 'versions.json')))
         vers_new = copy.deepcopy(vers)
         for branch in vers:
@@ -120,6 +135,7 @@ class FcNixOS(Repository):
                 pin = nixpkgs.query_trunk_pinning()
                 vers_new[branch]['rev'] = pin
         if vers == vers_new:
+            _log.debug('No version changes detected')
             return
         _log.info('Updating SHA256 checksums')
         for branch in vers_new:
@@ -141,17 +157,36 @@ class FcNixOS(Repository):
         self.run('git', 'commit', '--no-edit', '-m',
                  'Update pinnings of tracked branches',
                  check=False)
-        self.issue_pr = True
+        self.pkgset_after = self.packageset()
+        self.issue_pr = (self.pkgset_before != self.pkgset_after)
+        diff = self.pkgset_before.diff(self.pkgset_after)
+        _log.debug('pkgset diff: %s', diff)
 
     def create_pr(self):
         if not self.issue_pr:
             _log.info('Nothing to submit')
             return
         _log.info('Creating fc-nixos pull request')
+        diff = self.pkgset_before.diff(self.pkgset_after)
+        _log.debug('pkgset diff: %s', diff)
+        text = []
+        if diff['updated']:
+            text.append('\n## Updated')
+            for (desc, pkg) in diff['updated']:
+                text.append(f'* {desc} ({pkg})')
+        if diff['removed']:
+            text.append('\n## Removed')
+            for (desc, pkg) in diff['removed']:
+                text.append(f'* {desc} ({pkg})')
+        if diff['added']:
+            text.append('\n## Added')
+            for (desc, pkg) in diff['added']:
+                text.append(f'* {desc} ({pkg})')
         self.run('git', 'push', '-u', 'origin', self.feature_branch)
         resp = github.request('POST', API_BASE_URL + '/pulls', {
             'title': '(auto) Update pinnings of tracked branches',
             'head': self.feature_branch,
+            'body': '\n'.join(text),
             'base': f'fc-{TRUNK}-dev',
             'maintainer_can_modify': True,
         })
@@ -170,6 +205,10 @@ def main():
     a = argparse.ArgumentParser()
     a.add_argument('workdir', default='.',
                    help='directory to hold nixpkgs and fc-nixos checkouts')
+    a.add_argument(
+        '-n', '--no-push', '--dry-run', default=False, action='store_true',
+        help="commit changes locally, but don't push to origin and don't "
+        "create pull requests")
     a.add_argument('-v', '--verbose', action='store_true', help='more output')
     args = a.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
@@ -181,8 +220,9 @@ def main():
     fc_nixos = FcNixOS('fc-nixos', FC_NIXOS_URL)
     fc_nixos.ensure()
     fc_nixos.update_pinnings(nixpkgs)
-    nixpkgs.push()
-    fc_nixos.create_pr()
+    if not args.no_push:
+        nixpkgs.push()
+        fc_nixos.create_pr()
 
 
 if __name__ == '__main__':

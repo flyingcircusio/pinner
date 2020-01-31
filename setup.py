@@ -29,7 +29,10 @@ setup(
     ],
     extras_require={
         'dev': ['check-manifest'],
+        'test': ['pytest']
     },
+    tests_require=['pytest'],
+    setup_requires=['pytest-runner'],
     entry_points={
         'console_scripts': [
             'pinner=pinner.main:main',
